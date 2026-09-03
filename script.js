@@ -6,6 +6,7 @@ const stopButton = document.getElementById("stopCamera");
 const cameraStatus = document.getElementById("cameraStatus");
 const cameraPlaceholder = document.getElementById("cameraPlaceholder");
 const recognitionStatus = document.getElementById("recognitionStatus");
+const deerAudio = document.getElementById("deerAudio");
 
 let activeStream = null;
 let imageModel = null;
@@ -16,6 +17,10 @@ let recognitionSession = 0;
 let smoothedScores = new Map();
 let candidateLabel = null;
 let candidateFrames = 0;
+let deerSoundIsPlaying = false;
+let deerSoundSession = 0;
+let deerAudioIsPrimed = false;
+let deerWasAboveThreshold = false;
 
 const MODEL_BASE_URL = "https://teachablemachine.withgoogle.com/models/2mx-T-4rY/";
 const SUPPORTED_ANIMALS = new Set(["deer", "cat"]);
@@ -23,6 +28,7 @@ const MINIMUM_CONFIDENCE = 0.8;
 const SMOOTHING_FACTOR = 0.35;
 const REQUIRED_STABLE_PREDICTIONS = 4;
 const PREDICTION_INTERVAL_MS = 160;
+const DEER_SOUND_THRESHOLD = 0.80;
 
 function setCameraStatus(message, state = "off") {
   cameraStatus.classList.remove("is-active", "is-error");
@@ -56,6 +62,72 @@ function resetRecognitionSmoothing() {
   smoothedScores = new Map();
   candidateLabel = null;
   candidateFrames = 0;
+}
+
+function getDeerProbability(predictions) {
+  return (
+    predictions.find((prediction) => prediction.className.trim().toLowerCase() === "deer")?.probability ?? 0
+  );
+}
+
+function stopDeerSound() {
+  deerSoundSession += 1;
+  deerSoundIsPlaying = false;
+  deerWasAboveThreshold = false;
+  deerAudio.pause();
+  deerAudio.currentTime = 0;
+}
+
+async function startDeerSound() {
+  if (deerSoundIsPlaying) return;
+
+  deerSoundIsPlaying = true;
+  const session = ++deerSoundSession;
+  deerAudio.loop = true;
+  deerAudio.currentTime = 0;
+
+  try {
+    await deerAudio.play();
+    if (!deerSoundIsPlaying || session !== deerSoundSession) {
+      deerAudio.pause();
+      deerAudio.currentTime = 0;
+    }
+  } catch (error) {
+    if (session === deerSoundSession) deerSoundIsPlaying = false;
+  }
+}
+
+function updateDeerSound(deerProbability) {
+  const deerIsAboveThreshold = deerProbability > DEER_SOUND_THRESHOLD;
+
+  if (deerIsAboveThreshold && !deerWasAboveThreshold) {
+    deerWasAboveThreshold = true;
+    startDeerSound();
+  } else if (!deerIsAboveThreshold && deerWasAboveThreshold) {
+    stopDeerSound();
+  }
+}
+
+function primeDeerAudio() {
+  if (deerAudioIsPrimed) return;
+
+  // This muted play attempt happens inside the Start Camera click, which lets
+  // mobile browsers permit the later model-triggered sound playback.
+  deerAudio.muted = true;
+  const playAttempt = deerAudio.play();
+
+  if (playAttempt) {
+    playAttempt
+      .then(() => {
+        deerAudio.pause();
+        deerAudio.currentTime = 0;
+        deerAudio.muted = false;
+        deerAudioIsPrimed = true;
+      })
+      .catch(() => {
+        deerAudio.muted = false;
+      });
+  }
 }
 
 async function loadAnimalModel() {
@@ -142,9 +214,11 @@ async function runRecognition(timestamp, session) {
     const predictions = await imageModel.predict(camera);
     if (!activeStream || session !== recognitionSession) return;
 
+    updateDeerSound(getDeerProbability(predictions));
     updateStablePrediction(getSmoothedTopPrediction(predictions));
   } catch (error) {
     if (session === recognitionSession) {
+      stopDeerSound();
       setRecognitionStatus("Recognition paused — please restart the camera", "error");
     }
     return;
@@ -231,6 +305,7 @@ async function startCamera() {
 
   if (activeStream) stopCamera();
 
+  primeDeerAudio();
   startButton.disabled = true;
   setCameraStatus("Starting camera…");
 
@@ -249,6 +324,7 @@ async function startCamera() {
   } catch (error) {
     if (activeStream) activeStream.getTracks().forEach((track) => track.stop());
 
+    stopDeerSound();
     activeStream = null;
     camera.srcObject = null;
     cameraPlaceholder.hidden = false;
@@ -259,6 +335,7 @@ async function startCamera() {
 
 function stopCamera() {
   stopRecognition();
+  stopDeerSound();
 
   if (activeStream) activeStream.getTracks().forEach((track) => track.stop());
 
