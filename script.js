@@ -5,8 +5,24 @@ const startButton = document.getElementById("startCamera");
 const stopButton = document.getElementById("stopCamera");
 const cameraStatus = document.getElementById("cameraStatus");
 const cameraPlaceholder = document.getElementById("cameraPlaceholder");
+const recognitionStatus = document.getElementById("recognitionStatus");
 
 let activeStream = null;
+let imageModel = null;
+let modelState = "loading";
+let recognitionFrameId = null;
+let lastPredictionTime = 0;
+let recognitionSession = 0;
+let smoothedScores = new Map();
+let candidateLabel = null;
+let candidateFrames = 0;
+
+const MODEL_BASE_URL = "https://teachablemachine.withgoogle.com/models/2mx-T-4rY/";
+const SUPPORTED_ANIMALS = new Set(["deer", "cat"]);
+const MINIMUM_CONFIDENCE = 0.8;
+const SMOOTHING_FACTOR = 0.35;
+const REQUIRED_STABLE_PREDICTIONS = 4;
+const PREDICTION_INTERVAL_MS = 160;
 
 function setCameraStatus(message, state = "off") {
   cameraStatus.classList.remove("is-active", "is-error");
@@ -21,6 +37,148 @@ function setCameraStatus(message, state = "off") {
 function updateControls(isRunning) {
   startButton.disabled = isRunning;
   stopButton.disabled = !isRunning;
+}
+
+function setRecognitionStatus(message, state = "loading") {
+  recognitionStatus.classList.remove("is-ready", "is-detected", "is-error");
+
+  if (state === "ready") recognitionStatus.classList.add("is-ready");
+  if (state === "detected") recognitionStatus.classList.add("is-detected");
+  if (state === "error") recognitionStatus.classList.add("is-error");
+
+  const dot = document.createElement("span");
+  dot.className = "recognition-status__dot";
+  dot.setAttribute("aria-hidden", "true");
+  recognitionStatus.replaceChildren(dot, document.createTextNode(message));
+}
+
+function resetRecognitionSmoothing() {
+  smoothedScores = new Map();
+  candidateLabel = null;
+  candidateFrames = 0;
+}
+
+async function loadAnimalModel() {
+  try {
+    if (!window.tmImage) throw new Error("Teachable Machine image library did not load");
+
+    imageModel = await window.tmImage.load(
+      `${MODEL_BASE_URL}model.json`,
+      `${MODEL_BASE_URL}metadata.json`,
+    );
+    modelState = "ready";
+
+    if (activeStream) {
+      startRecognition();
+    } else {
+      setRecognitionStatus("Animal model ready — start the camera", "ready");
+    }
+  } catch (error) {
+    imageModel = null;
+    modelState = "error";
+    setRecognitionStatus("Animal model could not load", "error");
+  }
+}
+
+function getSmoothedTopPrediction(predictions) {
+  const animalPredictions = predictions.filter((prediction) =>
+    SUPPORTED_ANIMALS.has(prediction.className.trim().toLowerCase()),
+  );
+
+  animalPredictions.forEach((prediction) => {
+    const label = prediction.className.trim();
+    const previousScore = smoothedScores.get(label);
+    const nextScore =
+      previousScore === undefined
+        ? prediction.probability
+        : previousScore + SMOOTHING_FACTOR * (prediction.probability - previousScore);
+    smoothedScores.set(label, nextScore);
+  });
+
+  return [...smoothedScores.entries()]
+    .map(([label, probability]) => ({ label, probability }))
+    .sort((first, second) => second.probability - first.probability)[0];
+}
+
+function updateStablePrediction(prediction) {
+  if (!prediction || prediction.probability < MINIMUM_CONFIDENCE) {
+    candidateLabel = null;
+    candidateFrames = 0;
+    setRecognitionStatus("Looking for a clear Deer or Cat shadow…", "ready");
+    return;
+  }
+
+  if (prediction.label === candidateLabel) {
+    candidateFrames += 1;
+  } else {
+    candidateLabel = prediction.label;
+    candidateFrames = 1;
+  }
+
+  if (candidateFrames >= REQUIRED_STABLE_PREDICTIONS) {
+    const confidence = Math.round(prediction.probability * 100);
+    setRecognitionStatus(`Detected: ${prediction.label} (${confidence}%)`, "detected");
+  } else {
+    setRecognitionStatus("Checking the shadow…", "ready");
+  }
+}
+
+async function runRecognition(timestamp, session) {
+  if (!activeStream || !imageModel || session !== recognitionSession) return;
+
+  if (timestamp - lastPredictionTime < PREDICTION_INTERVAL_MS) {
+    recognitionFrameId = requestAnimationFrame((nextTimestamp) => runRecognition(nextTimestamp, session));
+    return;
+  }
+
+  if (camera.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
+    recognitionFrameId = requestAnimationFrame((nextTimestamp) => runRecognition(nextTimestamp, session));
+    return;
+  }
+
+  lastPredictionTime = timestamp;
+
+  try {
+    const predictions = await imageModel.predict(camera);
+    if (!activeStream || session !== recognitionSession) return;
+
+    updateStablePrediction(getSmoothedTopPrediction(predictions));
+  } catch (error) {
+    if (session === recognitionSession) {
+      setRecognitionStatus("Recognition paused — please restart the camera", "error");
+    }
+    return;
+  }
+
+  recognitionFrameId = requestAnimationFrame((nextTimestamp) => runRecognition(nextTimestamp, session));
+}
+
+function startRecognition() {
+  if (!activeStream) return;
+
+  if (!imageModel) {
+    if (modelState === "loading") setRecognitionStatus("Loading animal model…");
+    return;
+  }
+
+  cancelAnimationFrame(recognitionFrameId);
+  recognitionSession += 1;
+  const session = recognitionSession;
+  lastPredictionTime = 0;
+  resetRecognitionSmoothing();
+  setRecognitionStatus("Looking for a clear Deer or Cat shadow…", "ready");
+  recognitionFrameId = requestAnimationFrame((timestamp) => runRecognition(timestamp, session));
+}
+
+function stopRecognition() {
+  recognitionSession += 1;
+  cancelAnimationFrame(recognitionFrameId);
+  recognitionFrameId = null;
+  resetRecognitionSmoothing();
+
+  if (modelState === "ready") {
+    setRecognitionStatus("Animal model ready — start the camera", "ready");
+  }
 }
 
 function cameraErrorMessage(error) {
@@ -87,6 +245,7 @@ async function startCamera() {
     const activeTrack = activeStream.getVideoTracks()[0];
     const facingMode = activeTrack?.getSettings?.().facingMode;
     setCameraStatus(facingMode === "environment" ? "Rear camera is on" : "Camera is on", "active");
+    startRecognition();
   } catch (error) {
     if (activeStream) activeStream.getTracks().forEach((track) => track.stop());
 
@@ -99,6 +258,8 @@ async function startCamera() {
 }
 
 function stopCamera() {
+  stopRecognition();
+
   if (activeStream) activeStream.getTracks().forEach((track) => track.stop());
 
   activeStream = null;
@@ -111,3 +272,5 @@ function stopCamera() {
 startButton.addEventListener("click", startCamera);
 stopButton.addEventListener("click", stopCamera);
 window.addEventListener("beforeunload", stopCamera);
+
+loadAnimalModel();

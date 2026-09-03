@@ -71,6 +71,14 @@ video { display: block; width: 100%; min-height: 300px; max-height: 500px; objec
 .button--primary:hover:not(:disabled) { background: var(--purple-deep); }
 .button--secondary { color: var(--ink); border-color: #e2e3e9; background: #fff; }
 .button--secondary:hover:not(:disabled) { background: #f7f8fb; }
+.recognition-status { display: inline-flex; gap: 0.45rem; align-items: center; margin: 0.9rem 0 0; padding: 0.45rem 0.65rem; border-radius: 999px; color: #6b6680; background: #f4f2fa; font-size: 0.76rem; font-weight: 800; }
+.recognition-status__dot { width: 7px; height: 7px; border-radius: 50%; background: #aaa4b8; }
+.recognition-status.is-ready { color: #4d5d8f; background: #edf1ff; }
+.recognition-status.is-ready .recognition-status__dot { background: #6d83d4; }
+.recognition-status.is-detected { color: #27735f; background: #e7f7f0; }
+.recognition-status.is-detected .recognition-status__dot { background: #34b88f; box-shadow: 0 0 0 3px rgba(52, 184, 143, 0.16); }
+.recognition-status.is-error { color: #ad4c65; background: #fff0f3; }
+.recognition-status.is-error .recognition-status__dot { background: #e36c86; }
 .privacy-note { margin: 0.9rem 0 0; color: var(--muted); font-size: 0.78rem; font-weight: 600; line-height: 1.45; }
 
 footer { padding: 0 1rem 2rem; color: #8a8793; text-align: center; font-size: 0.78rem; font-weight: 700; }
