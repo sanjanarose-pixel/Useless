@@ -8,7 +8,6 @@ const cameraPlaceholder = document.getElementById("cameraPlaceholder");
 const recognitionStatus = document.getElementById("recognitionStatus");
 
 const animalAudio = {
-  deer: document.getElementById("deerAudio"),
   bird: document.getElementById("birdAudio"),
   chicken: document.getElementById("chickenAudio"),
   crab: document.getElementById("crabAudio"),
@@ -34,13 +33,13 @@ let audioIsPrimed = false;
 const MODEL_BASE_URL =
   "https://teachablemachine.withgoogle.com/models/2mx-T-4rY/";
 
-const SUPPORTED_ANIMALS = new Set([
-  "deer",
+const SUPPORTED_CLASSES = new Set([
   "bird",
   "chicken",
   "crab",
   "snake",
   "dog",
+  "nothing",
 ]);
 
 const MINIMUM_CONFIDENCE = 0.8;
@@ -56,7 +55,8 @@ function setCameraStatus(message, state = "off") {
   if (state === "error") cameraStatus.classList.add("is-error");
 
   cameraStatus.innerHTML =
-    '<span class="camera-status__dot" aria-hidden="true"></span>' + message;
+    '<span class="camera-status__dot" aria-hidden="true"></span>' +
+    message;
 }
 
 function updateControls(isRunning) {
@@ -142,7 +142,9 @@ async function startAnimalSound(animal) {
 
 function updateAnimalSound(animal, probability) {
   const isAboveThreshold =
-    animal && probability > ANIMAL_SOUND_THRESHOLD;
+    animal &&
+    animal !== "nothing" &&
+    probability > ANIMAL_SOUND_THRESHOLD;
 
   if (!isAboveThreshold) {
     if (activeAnimal !== null) {
@@ -217,14 +219,14 @@ async function loadAnimalModel() {
 }
 
 function getSmoothedTopPrediction(predictions) {
-  const animalPredictions = predictions.filter((prediction) =>
-    SUPPORTED_ANIMALS.has(
+  const supportedPredictions = predictions.filter((prediction) =>
+    SUPPORTED_CLASSES.has(
       prediction.className.trim().toLowerCase()
     )
   );
 
-  animalPredictions.forEach((prediction) => {
-    const label = prediction.className.trim();
+  supportedPredictions.forEach((prediction) => {
+    const label = prediction.className.trim().toLowerCase();
     const previousScore = smoothedScores.get(label);
 
     const nextScore =
@@ -258,6 +260,18 @@ function updateStablePrediction(prediction) {
 
     setRecognitionStatus(
       "Looking for a clear animal shadow…",
+      "ready"
+    );
+
+    return;
+  }
+
+  if (prediction.label === "nothing") {
+    candidateLabel = null;
+    candidateFrames = 0;
+
+    setRecognitionStatus(
+      "No animal detected",
       "ready"
     );
 
@@ -342,7 +356,7 @@ async function runRecognition(timestamp, session) {
         ANIMAL_SOUND_THRESHOLD
     ) {
       updateAnimalSound(
-        topPrediction.label.trim().toLowerCase(),
+        topPrediction.label,
         topPrediction.probability
       );
     } else {
@@ -439,7 +453,6 @@ function cameraErrorMessage(error) {
 
 async function requestCamera() {
   try {
-    // Phones should use the rear camera to face the wall.
     return await navigator.mediaDevices.getUserMedia({
       audio: false,
       video: {
@@ -447,8 +460,6 @@ async function requestCamera() {
       },
     });
   } catch (error) {
-    // Laptops and single-camera devices can fall back
-    // to their available webcam.
     if (
       error?.name === "OverconstrainedError" ||
       error?.name === "ConstraintNotSatisfiedError" ||
