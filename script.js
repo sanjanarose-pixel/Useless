@@ -7,9 +7,8 @@ const cameraStatus = document.getElementById("cameraStatus");
 const cameraPlaceholder = document.getElementById("cameraPlaceholder");
 const recognitionStatus = document.getElementById("recognitionStatus");
 
+// Only the three animals we currently support.
 const animalAudio = {
-  bird: document.getElementById("birdAudio"),
-  chicken: document.getElementById("chickenAudio"),
   crab: document.getElementById("crabAudio"),
   snake: document.getElementById("snakeAudio"),
   dog: document.getElementById("dogAudio"),
@@ -18,51 +17,72 @@ const animalAudio = {
 let activeStream = null;
 let imageModel = null;
 let modelState = "loading";
+
 let recognitionFrameId = null;
 let lastPredictionTime = 0;
 let recognitionSession = 0;
 
+// Prediction smoothing
 let smoothedScores = new Map();
 let candidateLabel = null;
 let candidateFrames = 0;
 
+// Currently playing animal
 let activeAnimal = null;
 let audioSession = 0;
-let audioIsPrimed = false;
 
 const MODEL_BASE_URL =
   "https://teachablemachine.withgoogle.com/models/2mx-T-4rY/";
 
+// These MUST match the classes in your Teachable Machine model.
 const SUPPORTED_CLASSES = new Set([
-  "bird",
-  "chicken",
   "crab",
   "snake",
   "dog",
   "nothing",
 ]);
 
-const MINIMUM_CONFIDENCE = 0.8;
+const MINIMUM_CONFIDENCE = 0.80;
 const SMOOTHING_FACTOR = 0.35;
 const REQUIRED_STABLE_PREDICTIONS = 4;
 const PREDICTION_INTERVAL_MS = 160;
 const ANIMAL_SOUND_THRESHOLD = 0.80;
 
+
+// --------------------------------------------------
+// CAMERA STATUS
+// --------------------------------------------------
+
 function setCameraStatus(message, state = "off") {
   cameraStatus.classList.remove("is-active", "is-error");
 
-  if (state === "active") cameraStatus.classList.add("is-active");
-  if (state === "error") cameraStatus.classList.add("is-error");
+  if (state === "active") {
+    cameraStatus.classList.add("is-active");
+  }
+
+  if (state === "error") {
+    cameraStatus.classList.add("is-error");
+  }
 
   cameraStatus.innerHTML =
     '<span class="camera-status__dot" aria-hidden="true"></span>' +
     message;
 }
 
+
+// --------------------------------------------------
+// BUTTONS
+// --------------------------------------------------
+
 function updateControls(isRunning) {
   startButton.disabled = isRunning;
   stopButton.disabled = !isRunning;
 }
+
+
+// --------------------------------------------------
+// RECOGNITION STATUS
+// --------------------------------------------------
 
 function setRecognitionStatus(message, state = "loading") {
   recognitionStatus.classList.remove(
@@ -93,34 +113,61 @@ function setRecognitionStatus(message, state = "loading") {
   );
 }
 
+
+// --------------------------------------------------
+// RESET PREDICTION SMOOTHING
+// --------------------------------------------------
+
 function resetRecognitionSmoothing() {
   smoothedScores = new Map();
   candidateLabel = null;
   candidateFrames = 0;
 }
 
+
+// --------------------------------------------------
+// STOP ALL ANIMAL SOUNDS
+// --------------------------------------------------
+
 function stopAnimalSound() {
   audioSession += 1;
   activeAnimal = null;
 
   Object.values(animalAudio).forEach((audio) => {
+    if (!audio) return;
+
     audio.pause();
-    audio.currentTime = 0;
+
+    try {
+      audio.currentTime = 0;
+    } catch (error) {
+      // Ignore audio reset errors.
+    }
   });
 }
+
+
+// --------------------------------------------------
+// START ANIMAL SOUND
+// --------------------------------------------------
 
 async function startAnimalSound(animal) {
   const audio = animalAudio[animal];
 
-  if (!audio) return;
+  if (!audio) {
+    return;
+  }
 
+  // Already playing the correct sound.
   if (activeAnimal === animal && !audio.paused) {
     return;
   }
 
+  // Stop whatever was playing first.
   stopAnimalSound();
 
   activeAnimal = animal;
+
   const session = ++audioSession;
 
   audio.loop = true;
@@ -129,67 +176,74 @@ async function startAnimalSound(animal) {
   try {
     await audio.play();
 
-    if (activeAnimal !== animal || session !== audioSession) {
+    // If the user changed animals while play() was starting,
+    // immediately stop this old sound.
+    if (
+      activeAnimal !== animal ||
+      session !== audioSession
+    ) {
       audio.pause();
-      audio.currentTime = 0;
+
+      try {
+        audio.currentTime = 0;
+      } catch (error) {
+        // Ignore reset errors.
+      }
     }
   } catch (error) {
-    if (activeAnimal === animal && session === audioSession) {
+    // Browser may block audio until the user interacts with the page.
+    // Do not let this break recognition.
+    if (
+      activeAnimal === animal &&
+      session === audioSession
+    ) {
       activeAnimal = null;
     }
+
+    console.warn(
+      `Could not play ${animal} sound.`,
+      error
+    );
   }
 }
 
+
+// --------------------------------------------------
+// UPDATE ANIMAL SOUND
+// --------------------------------------------------
+
 function updateAnimalSound(animal, probability) {
-  const isAboveThreshold =
+  const shouldPlay =
     animal &&
     animal !== "nothing" &&
-    probability > ANIMAL_SOUND_THRESHOLD;
+    probability >= ANIMAL_SOUND_THRESHOLD;
 
-  if (!isAboveThreshold) {
+  // No clear animal = stop sound.
+  if (!shouldPlay) {
     if (activeAnimal !== null) {
       stopAnimalSound();
     }
+
     return;
   }
 
+  // Start only if the detected animal changed.
   if (activeAnimal !== animal) {
     startAnimalSound(animal);
   }
 }
 
-function primeAnimalAudio() {
-  if (audioIsPrimed) return;
 
-  const audioElements = Object.values(animalAudio);
-
-  audioElements.forEach((audio) => {
-    audio.muted = true;
-  });
-
-  Promise.all(
-    audioElements.map((audio) =>
-      audio
-        .play()
-        .then(() => {
-          audio.pause();
-          audio.currentTime = 0;
-        })
-        .catch(() => {})
-    )
-  ).finally(() => {
-    audioElements.forEach((audio) => {
-      audio.muted = false;
-    });
-
-    audioIsPrimed = true;
-  });
-}
+// --------------------------------------------------
+// LOAD TEACHABLE MACHINE MODEL
+// --------------------------------------------------
 
 async function loadAnimalModel() {
   try {
     if (!window.tmImage) {
-      throw new Error("Teachable Machine image library did not load");
+      throw new Error(
+        "Teachable Machine image library did not load"
+      );
     }
 
     imageModel = await window.tmImage.load(
@@ -208,6 +262,8 @@ async function loadAnimalModel() {
       );
     }
   } catch (error) {
+    console.error("Model loading error:", error);
+
     imageModel = null;
     modelState = "error";
 
@@ -218,28 +274,42 @@ async function loadAnimalModel() {
   }
 }
 
-function getSmoothedTopPrediction(predictions) {
-  const supportedPredictions = predictions.filter((prediction) =>
-    SUPPORTED_CLASSES.has(
-      prediction.className.trim().toLowerCase()
-    )
-  );
 
-  supportedPredictions.forEach((prediction) => {
-    const label = prediction.className.trim().toLowerCase();
-    const previousScore = smoothedScores.get(label);
+// --------------------------------------------------
+// GET SMOOTHED TOP PREDICTION
+// --------------------------------------------------
+
+function getSmoothedTopPrediction(predictions) {
+  const currentScores = new Map();
+
+  // Only use the classes we actually want.
+  predictions.forEach((prediction) => {
+    const label = prediction.className
+      .trim()
+      .toLowerCase();
+
+    if (!SUPPORTED_CLASSES.has(label)) {
+      return;
+    }
+
+    currentScores.set(label, prediction.probability);
+  });
+
+  // Smooth EVERY supported class.
+  // Missing classes are treated as zero.
+  SUPPORTED_CLASSES.forEach((label) => {
+    const currentScore = currentScores.get(label) || 0;
+    const previousScore = smoothedScores.get(label) || 0;
 
     const nextScore =
-      previousScore === undefined
-        ? prediction.probability
-        : previousScore +
-          SMOOTHING_FACTOR *
-            (prediction.probability - previousScore);
+      previousScore +
+      SMOOTHING_FACTOR *
+        (currentScore - previousScore);
 
     smoothedScores.set(label, nextScore);
   });
 
-  return [...smoothedScores.entries()]
+  const sorted = [...smoothedScores.entries()]
     .map(([label, probability]) => ({
       label,
       probability,
@@ -247,8 +317,15 @@ function getSmoothedTopPrediction(predictions) {
     .sort(
       (first, second) =>
         second.probability - first.probability
-    )[0];
+    );
+
+  return sorted[0] || null;
 }
+
+
+// --------------------------------------------------
+// STABLE PREDICTION
+// --------------------------------------------------
 
 function updateStablePrediction(prediction) {
   if (
@@ -258,6 +335,10 @@ function updateStablePrediction(prediction) {
     candidateLabel = null;
     candidateFrames = 0;
 
+    // Make absolutely sure no sound continues
+    // when confidence falls below 80%.
+    updateAnimalSound(null, 0);
+
     setRecognitionStatus(
       "Looking for a clear animal shadow…",
       "ready"
@@ -266,9 +347,12 @@ function updateStablePrediction(prediction) {
     return;
   }
 
+  // "Nothing" means no animal is currently visible.
   if (prediction.label === "nothing") {
     candidateLabel = null;
     candidateFrames = 0;
+
+    updateAnimalSound(null, 0);
 
     setRecognitionStatus(
       "No animal detected",
@@ -278,6 +362,7 @@ function updateStablePrediction(prediction) {
     return;
   }
 
+  // Count consecutive frames with the same animal.
   if (prediction.label === candidateLabel) {
     candidateFrames += 1;
   } else {
@@ -285,6 +370,8 @@ function updateStablePrediction(prediction) {
     candidateFrames = 1;
   }
 
+  // Wait for a few consistent predictions
+  // before showing "Detected".
   if (candidateFrames >= REQUIRED_STABLE_PREDICTIONS) {
     const confidence = Math.round(
       prediction.probability * 100
@@ -302,6 +389,11 @@ function updateStablePrediction(prediction) {
   }
 }
 
+
+// --------------------------------------------------
+// RECOGNITION LOOP
+// --------------------------------------------------
+
 async function runRecognition(timestamp, session) {
   if (
     !activeStream ||
@@ -311,6 +403,7 @@ async function runRecognition(timestamp, session) {
     return;
   }
 
+  // Don't run the model too frequently.
   if (
     timestamp - lastPredictionTime <
     PREDICTION_INTERVAL_MS
@@ -323,6 +416,7 @@ async function runRecognition(timestamp, session) {
     return;
   }
 
+  // Wait until camera has usable video data.
   if (
     camera.readyState <
     HTMLMediaElement.HAVE_CURRENT_DATA
@@ -338,8 +432,11 @@ async function runRecognition(timestamp, session) {
   lastPredictionTime = timestamp;
 
   try {
-    const predictions = await imageModel.predict(camera);
+    const predictions =
+      await imageModel.predict(camera);
 
+    // Camera/session may have changed while prediction
+    // was running.
     if (
       !activeStream ||
       session !== recognitionSession
@@ -350,9 +447,13 @@ async function runRecognition(timestamp, session) {
     const topPrediction =
       getSmoothedTopPrediction(predictions);
 
+    updateStablePrediction(topPrediction);
+
+    // Sound follows the actual confidence.
     if (
       topPrediction &&
-      topPrediction.probability >
+      topPrediction.label !== "nothing" &&
+      topPrediction.probability >=
         ANIMAL_SOUND_THRESHOLD
     ) {
       updateAnimalSound(
@@ -362,9 +463,9 @@ async function runRecognition(timestamp, session) {
     } else {
       updateAnimalSound(null, 0);
     }
-
-    updateStablePrediction(topPrediction);
   } catch (error) {
+    console.error("Recognition error:", error);
+
     if (session === recognitionSession) {
       stopAnimalSound();
 
@@ -383,8 +484,15 @@ async function runRecognition(timestamp, session) {
   );
 }
 
+
+// --------------------------------------------------
+// START RECOGNITION
+// --------------------------------------------------
+
 function startRecognition() {
-  if (!activeStream) return;
+  if (!activeStream) {
+    return;
+  }
 
   if (!imageModel) {
     if (modelState === "loading") {
@@ -399,10 +507,15 @@ function startRecognition() {
   cancelAnimationFrame(recognitionFrameId);
 
   recognitionSession += 1;
+
   const session = recognitionSession;
 
   lastPredictionTime = 0;
+
   resetRecognitionSmoothing();
+
+  // IMPORTANT:
+  // Camera starting never starts an animal sound.
   stopAnimalSound();
 
   setRecognitionStatus(
@@ -410,16 +523,23 @@ function startRecognition() {
     "ready"
   );
 
-  recognitionFrameId = requestAnimationFrame(
-    (timestamp) =>
-      runRecognition(timestamp, session)
-  );
+  recognitionFrameId =
+    requestAnimationFrame(
+      (timestamp) =>
+        runRecognition(timestamp, session)
+    );
 }
+
+
+// --------------------------------------------------
+// STOP RECOGNITION
+// --------------------------------------------------
 
 function stopRecognition() {
   recognitionSession += 1;
 
   cancelAnimationFrame(recognitionFrameId);
+
   recognitionFrameId = null;
 
   resetRecognitionSmoothing();
@@ -431,6 +551,11 @@ function stopRecognition() {
     );
   }
 }
+
+
+// --------------------------------------------------
+// CAMERA ERROR MESSAGES
+// --------------------------------------------------
 
 function cameraErrorMessage(error) {
   switch (error?.name) {
@@ -446,23 +571,39 @@ function cameraErrorMessage(error) {
     case "TrackStartError":
       return "Camera is busy in another app";
 
+    case "OverconstrainedError":
+    case "ConstraintNotSatisfiedError":
+      return "Requested camera is not available";
+
     default:
       return "Camera could not be started";
   }
 }
 
+
+// --------------------------------------------------
+// REQUEST CAMERA
+// --------------------------------------------------
+
 async function requestCamera() {
+  // First try the rear/environment camera.
   try {
     return await navigator.mediaDevices.getUserMedia({
       audio: false,
+
       video: {
-        facingMode: "environment",
+        facingMode: {
+          ideal: "environment",
+        },
       },
     });
   } catch (error) {
+    // If the requested camera is unavailable,
+    // fall back to any available camera.
     if (
       error?.name === "OverconstrainedError" ||
-      error?.name === "ConstraintNotSatisfiedError" ||
+      error?.name ===
+        "ConstraintNotSatisfiedError" ||
       error?.name === "NotFoundError"
     ) {
       return navigator.mediaDevices.getUserMedia({
@@ -474,6 +615,11 @@ async function requestCamera() {
     throw error;
   }
 }
+
+
+// --------------------------------------------------
+// START CAMERA
+// --------------------------------------------------
 
 async function startCamera() {
   if (!navigator.mediaDevices?.getUserMedia) {
@@ -498,15 +644,17 @@ async function startCamera() {
     stopCamera();
   }
 
-  primeAnimalAudio();
-
   startButton.disabled = true;
-  setCameraStatus("Starting camera…");
+
+  setCameraStatus(
+    "Starting camera…"
+  );
 
   try {
     activeStream = await requestCamera();
 
     camera.srcObject = activeStream;
+
     await camera.play();
 
     cameraPlaceholder.hidden = true;
@@ -528,6 +676,8 @@ async function startCamera() {
 
     startRecognition();
   } catch (error) {
+    console.error("Camera error:", error);
+
     if (activeStream) {
       activeStream
         .getTracks()
@@ -537,7 +687,9 @@ async function startCamera() {
     stopAnimalSound();
 
     activeStream = null;
+
     camera.srcObject = null;
+
     cameraPlaceholder.hidden = false;
 
     updateControls(false);
@@ -549,8 +701,14 @@ async function startCamera() {
   }
 }
 
+
+// --------------------------------------------------
+// STOP CAMERA
+// --------------------------------------------------
+
 function stopCamera() {
   stopRecognition();
+
   stopAnimalSound();
 
   if (activeStream) {
@@ -560,13 +718,22 @@ function stopCamera() {
   }
 
   activeStream = null;
+
   camera.srcObject = null;
+
   cameraPlaceholder.hidden = false;
 
   updateControls(false);
 
-  setCameraStatus("Camera stopped");
+  setCameraStatus(
+    "Camera stopped"
+  );
 }
+
+
+// --------------------------------------------------
+// BUTTON EVENTS
+// --------------------------------------------------
 
 startButton.addEventListener(
   "click",
@@ -578,9 +745,19 @@ stopButton.addEventListener(
   stopCamera
 );
 
+
+// --------------------------------------------------
+// CLEAN UP WHEN PAGE CLOSES
+// --------------------------------------------------
+
 window.addEventListener(
   "beforeunload",
   stopCamera
 );
+
+
+// --------------------------------------------------
+// LOAD MODEL
+// --------------------------------------------------
 
 loadAnimalModel();
